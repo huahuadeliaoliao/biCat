@@ -1,4 +1,5 @@
-use reqwest::{self, header, Client, Error};
+use crate::error::ApplicationError;
+use reqwest::{self, header, Client};
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs::File;
@@ -6,6 +7,8 @@ use std::io::{self, Cursor};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task;
+
+mod error;
 
 const BASE_API_URL: &str = "https://api.bilibili.com/x/player/playurl?fnval=16";
 
@@ -20,7 +23,7 @@ struct ApiResponse<T> {
     data: T,
 }
 
-async fn create_custom_headers() -> Result<header::HeaderMap, header::InvalidHeaderValue> {
+async fn create_custom_headers() -> Result<header::HeaderMap, ApplicationError> {
     let mut headers = header::HeaderMap::new();
     headers.insert(header::CONNECTION, "Keep-Alive".parse()?);
     headers.insert(
@@ -40,10 +43,10 @@ async fn create_custom_headers() -> Result<header::HeaderMap, header::InvalidHea
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), ApplicationError> {
     let media_id = "3124599534";
     let client = Client::new();
-    let semaphore = Arc::new(Semaphore::new(10)); // 最多同时10个任务
+    let semaphore = Arc::new(Semaphore::new(10));
     let headers = create_custom_headers().await?;
 
     let video_bvids = fetch_bvids_from_media_id(&client, media_id, &headers).await?;
@@ -54,50 +57,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let headers = headers.clone();
         let permit = semaphore.clone().acquire_owned().await?;
         let handle = task::spawn(async move {
-            let video_data = fetch_video_data(&client, &bvid, &headers).await;
-            if let Ok(data) = video_data {
-                let audio_url =
-                    fetch_audio_url(&client, &bvid, &data.cid.to_string(), &headers).await;
-                if let Ok(url) = audio_url {
-                    download_audio(&client, &url, &data.title, &headers)
-                        .await
-                        .ok();
-                }
-            }
-            drop(permit); // 释放信号量
+            let video_data = fetch_video_data(&client, &bvid, &headers).await?;
+            let audio_url =
+                fetch_audio_url(&client, &bvid, &video_data.cid.to_string(), &headers).await?;
+            download_audio(&client, &audio_url, &video_data.title, &headers).await?;
+            drop(permit);
+            Ok::<(), ApplicationError>(())
         });
         handles.push(handle);
     }
 
-    // 等待所有任务完成
+    let mut all_successful = true;
     for handle in handles {
-        handle.await?;
+        if handle.await.is_err() {
+            all_successful = false;
+        }
     }
 
-    Ok(())
+    if !all_successful {
+        Err(ApplicationError::TaskProcessingError)
+    } else {
+        Ok(())
+    }
 }
 
 async fn fetch_bvids_from_media_id(
     client: &Client,
     media_id: &str,
     headers: &header::HeaderMap,
-) -> Result<Vec<String>, Error> {
+) -> Result<Vec<String>, ApplicationError> {
     let response = client
         .get("https://api.bilibili.com/x/v3/fav/resource/ids")
         .headers(headers.clone())
         .query(&[("media_id", media_id), ("platform", "web")])
         .send()
-        .await?
+        .await
+        .map_err(ApplicationError::NetworkError)?;
+    let json = response
         .json::<Value>()
-        .await?;
-
-    let bvids = response["data"]
+        .await
+        .map_err(|_| ApplicationError::DataParsingError("Invalid JSON format.".to_string()))?;
+    let bvids = json["data"]
         .as_array()
-        .unwrap_or(&vec![])
+        .ok_or(ApplicationError::DataFetchError)?
         .iter()
-        .filter_map(|v| v["bv_id"].as_str().map(|s| s.to_string()))
+        .filter_map(|v| v["bv_id"].as_str().map(String::from))
         .collect();
-
     Ok(bvids)
 }
 
@@ -105,7 +110,7 @@ async fn fetch_video_data(
     client: &Client,
     bvid: &str,
     headers: &header::HeaderMap,
-) -> Result<VideoData, Error> {
+) -> Result<VideoData, ApplicationError> {
     let url = format!(
         "https://api.bilibili.com/x/web-interface/view?bvid={}",
         bvid
@@ -114,10 +119,13 @@ async fn fetch_video_data(
         .get(&url)
         .headers(headers.clone())
         .send()
-        .await?
+        .await
+        .map_err(ApplicationError::NetworkError)?;
+    response
         .json::<ApiResponse<VideoData>>()
-        .await?;
-    Ok(response.data)
+        .await
+        .map(|api_response| api_response.data)
+        .map_err(|_| ApplicationError::DataParsingError("Failed to parse video data.".to_string()))
 }
 
 async fn fetch_audio_url(
@@ -125,15 +133,18 @@ async fn fetch_audio_url(
     bvid: &str,
     cid: &str,
     headers: &header::HeaderMap,
-) -> Result<String, Error> {
+) -> Result<String, ApplicationError> {
     let url = format!("{}&bvid={}&cid={}", BASE_API_URL, bvid, cid);
-    client
+    let response = client
         .get(&url)
         .headers(headers.clone())
         .send()
-        .await?
+        .await
+        .map_err(ApplicationError::NetworkError)?;
+    response
         .json::<Value>()
         .await
+        .map_err(|_| ApplicationError::DataParsingError("Failed to parse audio URL.".to_string()))
         .map(|json| {
             json["data"]["dash"]["audio"][0]["baseUrl"]
                 .as_str()
@@ -147,19 +158,35 @@ async fn download_audio(
     audio_url: &str,
     title: &str,
     headers: &header::HeaderMap,
-) -> io::Result<()> {
+) -> Result<(), ApplicationError> {
+    let filename = format!("{}.mp3", title.replace('/', "-"));
     let response = client
         .get(audio_url)
         .headers(headers.clone())
         .send()
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(ApplicationError::NetworkError)?;
+
     let audio_data = response
         .bytes()
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(ApplicationError::NetworkError)?;
+
     let mut audio_cursor = Cursor::new(audio_data);
-    let mut file = File::create(format!("{}.mp3", title.replace('/', "-")))?; // Replace to avoid path issues
-    io::copy(&mut audio_cursor, &mut file)?;
-    Ok(())
+    let file_result = File::create(&filename);
+
+    match file_result {
+        Ok(mut file) => {
+            if let Err(e) =
+                io::copy(&mut audio_cursor, &mut file).map_err(ApplicationError::IoError)
+            {
+                // 在这里处理写入文件时的错误，并尝试删除文件
+                let _ = std::fs::remove_file(&filename); // 忽略删除错误
+                Err(e)
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) => Err(ApplicationError::IoError(e)),
+    }
 }

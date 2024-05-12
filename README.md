@@ -1,2 +1,2 @@
 # bicat
-使用tauri打造的第三方bilibili音频播放器 / Third-party bilibili audio player built with tauri
+速度极快的bilibili视频的音频下载器CLI，基于tokio，可实现下载收藏夹所有视频的音频，无须登录（目标收藏夹需要在下载的时候处于公开状态）
