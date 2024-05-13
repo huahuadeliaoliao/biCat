@@ -1,4 +1,3 @@
-use crate::error::ApplicationError;
 use reqwest::{self, header, Client};
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,13 +8,20 @@ use tokio::sync::Semaphore;
 use tokio::task;
 
 mod error;
+use crate::error::ApplicationError;
 
 const BASE_API_URL: &str = "https://api.bilibili.com/x/player/playurl?fnval=16";
+
+#[derive(Deserialize)]
+struct Owner {
+    name: String,
+}
 
 #[derive(Deserialize)]
 struct VideoData {
     title: String,
     cid: i64,
+    owner: Owner,
 }
 
 #[derive(Deserialize)]
@@ -60,25 +66,27 @@ async fn main() -> Result<(), ApplicationError> {
             let video_data = fetch_video_data(&client, &bvid, &headers).await?;
             let audio_url =
                 fetch_audio_url(&client, &bvid, &video_data.cid.to_string(), &headers).await?;
-            download_audio(&client, &audio_url, &video_data.title, &headers).await?;
+            download_audio(
+                &client,
+                &audio_url,
+                &video_data.title,
+                &video_data.owner.name,
+                &headers,
+            )
+            .await?;
             drop(permit);
             Ok::<(), ApplicationError>(())
         });
         handles.push(handle);
     }
 
-    let mut all_successful = true;
     for handle in handles {
-        if handle.await.is_err() {
-            all_successful = false;
+        if handle.await?.is_err() {
+            return Err(ApplicationError::TaskProcessingError);
         }
     }
 
-    if !all_successful {
-        Err(ApplicationError::TaskProcessingError)
-    } else {
-        Ok(())
-    }
+    Ok(())
 }
 
 async fn fetch_bvids_from_media_id(
@@ -157,9 +165,12 @@ async fn download_audio(
     client: &Client,
     audio_url: &str,
     title: &str,
+    owner_name: &str,
     headers: &header::HeaderMap,
 ) -> Result<(), ApplicationError> {
-    let filename = format!("{}.mp3", title.replace('/', "-"));
+    let safe_title = title.replace('/', "-");
+    let safe_owner_name = owner_name.replace('/', "-");
+    let filename = format!("{}-{}.mp3", safe_title, safe_owner_name);
     let response = client
         .get(audio_url)
         .headers(headers.clone())
@@ -180,7 +191,6 @@ async fn download_audio(
             if let Err(e) =
                 io::copy(&mut audio_cursor, &mut file).map_err(ApplicationError::IoError)
             {
-                // 在这里处理写入文件时的错误，并尝试删除文件
                 let _ = std::fs::remove_file(&filename); // 忽略删除错误
                 Err(e)
             } else {
