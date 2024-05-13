@@ -1,3 +1,4 @@
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::{self, header, Client};
 use serde::Deserialize;
 use serde_json::Value;
@@ -50,19 +51,29 @@ async fn create_custom_headers() -> Result<header::HeaderMap, ApplicationError> 
 
 #[tokio::main]
 async fn main() -> Result<(), ApplicationError> {
-    let media_id = "3124599534";
     let client = Client::new();
     let semaphore = Arc::new(Semaphore::new(10));
     let headers = create_custom_headers().await?;
-
+    let media_id = "3124599534";
     let video_bvids = fetch_bvids_from_media_id(&client, media_id, &headers).await?;
-    let mut handles = Vec::new();
+    let total_videos = video_bvids.len() as u64;
 
+    let progress_bar = ProgressBar::new(total_videos);
+    let style = ProgressStyle::default_bar()
+        .template(
+            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} ({eta})",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar());
+    progress_bar.set_style(style.progress_chars("C>-"));
+
+    let mut handles = Vec::new();
     for bvid in video_bvids {
         let client = client.clone();
         let headers = headers.clone();
-        let permit = semaphore.clone().acquire_owned().await?;
+        let semaphore = semaphore.clone();
+        let progress_bar = progress_bar.clone();
         let handle = task::spawn(async move {
+            let permit = semaphore.acquire_owned().await?;
             let video_data = fetch_video_data(&client, &bvid, &headers).await?;
             let audio_url =
                 fetch_audio_url(&client, &bvid, &video_data.cid.to_string(), &headers).await?;
@@ -74,6 +85,7 @@ async fn main() -> Result<(), ApplicationError> {
                 &headers,
             )
             .await?;
+            progress_bar.inc(1);
             drop(permit);
             Ok::<(), ApplicationError>(())
         });
@@ -81,11 +93,12 @@ async fn main() -> Result<(), ApplicationError> {
     }
 
     for handle in handles {
-        if handle.await?.is_err() {
+        if let Err(_) = handle.await? {
             return Err(ApplicationError::TaskProcessingError);
         }
     }
 
+    progress_bar.finish_with_message("Download complete");
     Ok(())
 }
 
@@ -191,7 +204,7 @@ async fn download_audio(
             if let Err(e) =
                 io::copy(&mut audio_cursor, &mut file).map_err(ApplicationError::IoError)
             {
-                let _ = std::fs::remove_file(&filename); // 忽略删除错误
+                let _ = std::fs::remove_file(&filename);
                 Err(e)
             } else {
                 Ok(())
