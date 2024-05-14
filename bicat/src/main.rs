@@ -55,7 +55,7 @@ async fn create_custom_headers() -> Result<header::HeaderMap, ApplicationError> 
 #[tokio::main]
 async fn main() -> Result<(), ApplicationError> {
     let matches = Command::new("bicat")
-        .version("1.0")
+        .version("0.1.0-beta")
         .about("Downloads audio from Bilibili given a media ID.")
         .arg(
             Arg::new("media_id")
