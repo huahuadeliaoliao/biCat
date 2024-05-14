@@ -1,3 +1,4 @@
+use clap::{Arg, Command};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::{self, header, Client, ClientBuilder};
 use serde::Deserialize;
@@ -53,15 +54,45 @@ async fn create_custom_headers() -> Result<header::HeaderMap, ApplicationError> 
 
 #[tokio::main]
 async fn main() -> Result<(), ApplicationError> {
+    let matches = Command::new("bicat")
+        .version("1.0")
+        .about("Downloads audio from Bilibili given a media ID.")
+        .arg(
+            Arg::new("media_id")
+                .help("The media ID to fetch videos from")
+                .required(true),
+        )
+        .get_matches();
+
+    let media_id = matches.get_one::<String>("media_id").unwrap();
+    if media_id.len() != 10 || !media_id.chars().all(char::is_numeric) {
+        eprintln!("Error: 'media_id' must be a 10-digit number.");
+        return Err(ApplicationError::DataFetchError);
+    }
+
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(30))
         .build()?;
     let semaphore = Arc::new(Semaphore::new(10));
     let headers = create_custom_headers().await?;
-    let media_id = "3124599534";
-    let video_bvids = fetch_bvids_from_media_id(&client, media_id, &headers).await?;
-    let total_videos = video_bvids.len() as u64;
+    let video_bvids = match fetch_bvids_from_media_id(&client, media_id, &headers).await {
+        Ok(bvids) if bvids.is_empty() => {
+            eprintln!(
+                "Error: No videos found for the given media ID or the collection is private."
+            );
+            return Err(ApplicationError::DataFetchError);
+        }
+        Ok(bvids) => bvids,
+        Err(ApplicationError::NetworkError(e))
+            if e.status() == Some(reqwest::StatusCode::NOT_FOUND) =>
+        {
+            eprintln!("Error: The media ID corresponds to a private or nonexistent collection.");
+            return Err(ApplicationError::DataFetchError);
+        }
+        Err(e) => return Err(e),
+    };
 
+    let total_videos = video_bvids.len() as u64;
     let progress_bar = ProgressBar::new(total_videos);
     let style = ProgressStyle::default_bar()
         .template(
@@ -87,7 +118,7 @@ async fn main() -> Result<(), ApplicationError> {
                 &video_data.title,
                 &video_data.owner.name,
                 &headers,
-                3, // 设置重试次数为3
+                3,
             )
             .await?;
             progress_bar.inc(1);
@@ -206,7 +237,7 @@ async fn download_audio_with_retry(
             Ok(res) => res,
             Err(e) => {
                 if attempt < retry_limit {
-                    let wait_time = Duration::from_secs(2u64.pow(attempt as u32)); // 指数退避
+                    let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
                     eprintln!(
                         "Attempt {} failed, retrying in {:?}: {:?}",
                         attempt, wait_time, e
