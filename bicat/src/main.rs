@@ -65,10 +65,6 @@ async fn main() -> Result<(), ApplicationError> {
         .get_matches();
 
     let media_id = matches.get_one::<String>("media_id").unwrap();
-    if media_id.len() != 10 || !media_id.chars().all(char::is_numeric) {
-        eprintln!("Error: 'media_id' must be a 10-digit number.");
-        return Err(ApplicationError::DataFetchError);
-    }
 
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(30))
