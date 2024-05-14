@@ -1,7 +1,19 @@
 [package]
 name = "bicat"
-version = "0.1.0"
+version = "0.1.0-beta"
 edition = "2021"
+authors = ["Florian Liao <huahuadeliaoliao@icloud.com>"]
+description = "bilibili收藏夹音频下载器"
+license = "MIT"
+
+[package.metadata.deb]
+maintainer = "Florian Liao <huahuadeliaoliao@icloud.com>"
+extended-description = "bilibili收藏夹音频下载器"
+license-file = ["LICENSE", "644"]
+depends = "$auto"
+assets = [
+    ["target/release/bicat", "usr/bin/", "755"]
+]
 
 [dependencies]
 reqwest = { version = "0.12.4", features = ["json"] }
