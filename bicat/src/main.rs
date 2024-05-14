@@ -45,47 +45,52 @@ async fn create_custom_headers() -> Result<header::HeaderMap, ApplicationError> 
         "text/html, application/xhtml+xml, */*".parse()?,
     );
     headers.insert(header::REFERER, "https://www.bilibili.com".parse()?);
-    headers.insert(
-        header::USER_AGENT,
-        "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0".parse()?,
-    );
     Ok(headers)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), ApplicationError> {
     let matches = Command::new("bicat")
-        .version("0.1.0-beta")
-        .about("Downloads audio from Bilibili given a media ID.")
+        .version("0.1.0")
+        .about("Downloads audio from Bilibili given a media ID or BVIDs.")
         .arg(
             Arg::new("media_id")
-                .help("The media ID to fetch videos from")
-                .required(true),
+                .help("The folder ID from which to retrieve the video")
+                .required(false)
+                .conflicts_with("bvids"),
+        )
+        .arg(
+            Arg::new("bvids")
+                .help("One or more BVIDs to download audio from")
+                .short('b')
+                .required(false)
+                .num_args(1..),
         )
         .get_matches();
-
-    let media_id = matches.get_one::<String>("media_id").unwrap();
 
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(30))
         .build()?;
     let semaphore = Arc::new(Semaphore::new(10));
     let headers = create_custom_headers().await?;
-    let video_bvids = match fetch_bvids_from_media_id(&client, media_id, &headers).await {
-        Ok(bvids) if bvids.is_empty() => {
-            eprintln!(
-                "Error: No videos found for the given media ID or the collection is private."
-            );
-            return Err(ApplicationError::DataFetchError);
+
+    let video_bvids = if let Some(bvids) = matches.get_many::<String>("bvids") {
+        bvids.map(|s| s.to_string()).collect()
+    } else if let Some(media_id) = matches.get_one::<String>("media_id") {
+        match fetch_bvids_from_media_id(&client, media_id, &headers).await {
+            Ok(bvids) if bvids.is_empty() => {
+                eprintln!("Error: No videos found or private collection.");
+                return Err(ApplicationError::DataFetchError);
+            }
+            Ok(bvids) => bvids,
+            Err(e) => {
+                eprintln!("Data fetch error: {}", e);
+                return Err(e);
+            }
         }
-        Ok(bvids) => bvids,
-        Err(ApplicationError::NetworkError(e))
-            if e.status() == Some(reqwest::StatusCode::NOT_FOUND) =>
-        {
-            eprintln!("Error: The media ID corresponds to a private or nonexistent collection.");
-            return Err(ApplicationError::DataFetchError);
-        }
-        Err(e) => return Err(e),
+    } else {
+        eprintln!("Input error: Specify media_id or bvids.");
+        return Err(ApplicationError::DataFetchError);
     };
 
     let total_videos = video_bvids.len() as u64;
@@ -94,17 +99,18 @@ async fn main() -> Result<(), ApplicationError> {
         .template(
             "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} ({eta})",
         )
-        .unwrap_or_else(|_| ProgressStyle::default_bar());
-    progress_bar.set_style(style.progress_chars("C>-"));
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .progress_chars("C>-");
+    progress_bar.set_style(style);
 
     let mut handles = Vec::new();
-    for bvid in video_bvids {
+    for bvid in video_bvids.clone() {
         let client = client.clone();
         let headers = headers.clone();
         let semaphore = semaphore.clone();
         let progress_bar = progress_bar.clone();
         let handle = task::spawn(async move {
-            let permit = semaphore.acquire_owned().await?;
+            let _permit = semaphore.acquire_owned().await;
             let video_data = fetch_video_data(&client, &bvid, &headers).await?;
             let audio_url =
                 fetch_audio_url(&client, &bvid, &video_data.cid.to_string(), &headers).await?;
@@ -118,29 +124,37 @@ async fn main() -> Result<(), ApplicationError> {
             )
             .await?;
             progress_bar.inc(1);
-            drop(permit);
             Ok::<(), ApplicationError>(())
         });
         handles.push(handle);
     }
 
-    for handle in handles {
+    let mut failed_bvids = Vec::new();
+    for (handle, bvid) in handles.into_iter().zip(video_bvids.iter()) {
         match handle.await {
-            Ok(result) => match result {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("Task failed with error: {:?}", e);
-                    return Err(ApplicationError::TaskProcessingError);
+            Ok(result) => {
+                if let Err(_) = result {
+                    eprintln!("Task completed with errors for BVID {}", bvid);
+                    failed_bvids.push(bvid.clone());
                 }
-            },
-            Err(e) => {
-                eprintln!("Task panicked or was cancelled: {:?}", e);
-                return Err(ApplicationError::TaskProcessingError);
+            }
+            Err(_) => {
+                eprintln!("Task could not be completed for BVID {}", bvid);
+                failed_bvids.push(bvid.clone());
             }
         }
     }
 
-    progress_bar.finish_with_message("Download complete");
+    if !failed_bvids.is_empty() {
+        let failed_bvids_str = failed_bvids.join(" ");
+        println!(
+            "\nFailed to download audio for BVIDs: {}\nuse the \"bicat -b\" command to try again\n",
+            failed_bvids_str
+        );
+        return Err(ApplicationError::TaskProcessingError);
+    }
+
+    println!("Download complete");
     Ok(())
 }
 
@@ -235,8 +249,8 @@ async fn download_audio_with_retry(
                 if attempt < retry_limit {
                     let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
                     eprintln!(
-                        "Attempt {} failed, retrying in {:?}: {:?}",
-                        attempt, wait_time, e
+                        "Attempt {} failed, retrying in {:?}: {}",
+                        attempt, wait_time, "Network error"
                     );
                     sleep(wait_time).await;
                     continue;
@@ -252,8 +266,8 @@ async fn download_audio_with_retry(
                 if attempt < retry_limit {
                     let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
                     eprintln!(
-                        "Attempt {} failed, retrying in {:?}: {:?}",
-                        attempt, wait_time, e
+                        "Attempt {} failed, retrying in {:?}: {}",
+                        attempt, wait_time, "Data download error"
                     );
                     sleep(wait_time).await;
                     continue;
@@ -272,8 +286,8 @@ async fn download_audio_with_retry(
                     if attempt < retry_limit {
                         let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
                         eprintln!(
-                            "Attempt {} failed, retrying in {:?}: {:?}",
-                            attempt, wait_time, e
+                            "Attempt {} failed, retrying in {:?}: {}",
+                            attempt, wait_time, "File write error"
                         );
                         sleep(wait_time).await;
                         continue;
@@ -286,8 +300,8 @@ async fn download_audio_with_retry(
                 if attempt < retry_limit {
                     let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
                     eprintln!(
-                        "Attempt {} failed, retrying in {:?}: {:?}",
-                        attempt, wait_time, e
+                        "Attempt {} failed, retrying in {:?}: {}",
+                        attempt, wait_time, "File creation error"
                     );
                     sleep(wait_time).await;
                     continue;

@@ -1,14 +1,14 @@
 [package]
 name = "bicat"
-version = "0.1.0-beta"
+version = "0.1.0"
 edition = "2021"
 authors = ["Florian Liao <huahuadeliaoliao@icloud.com>"]
-description = "bilibili收藏夹音频下载器"
+description = "bilibili收藏夹视频的音频文件下载器"
 license = "MIT"
 
 [package.metadata.deb]
 maintainer = "Florian Liao <huahuadeliaoliao@icloud.com>"
-extended-description = "bilibili收藏夹音频下载器"
+extended-description = "bilibili收藏夹视频的音频文件下载器"
 license-file = ["LICENSE", "644"]
 depends = "$auto"
 assets = [
