@@ -2,7 +2,7 @@
 A very fast command line tool to download audio files from bilibili videos, based on tokio, no login required (target favorites need to be public at the time of download).
 
 ## Version
-Beta 0.1.0 (The function of downloading audio from bookmarks has been implemented and can be used directly, but the current error messages are very rudimentary, and the functionality is only achieved through the command "bicat [media_id]" for download. Therefore, only deb and exe packages are provided for now. On Windows, when using bicat in cmd, you need to add the directory where bicat.exe is located to the environment variables.)
+Beta 0.1.0 (The functionality to download audio from bookmarks has been implemented and is ready for direct use. However, the current error messages are very basic, and the only functionality available is downloading via the "bicat [media_id]" command. As a result, only deb and exe packages have been created for the time being. When using bicat in the command prompt (cmd) on Windows, you will need to add the path to the bicat.exe file to the system environment variables.)
 
 ### Main functions
 - **Download audio files of favorite videos**: download audio files of all videos from Bilibili's specified favorite media_id (that is, the number after the fid of the web favorite URL) to the current directory, and save them as video title-video author name.mp3.
