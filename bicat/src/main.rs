@@ -1,12 +1,14 @@
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::{self, header, Client};
+use reqwest::{self, header, Client, ClientBuilder};
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs::File;
 use std::io::{self, Cursor};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::task;
+use tokio::time::sleep;
 
 mod error;
 use crate::error::ApplicationError;
@@ -51,7 +53,9 @@ async fn create_custom_headers() -> Result<header::HeaderMap, ApplicationError> 
 
 #[tokio::main]
 async fn main() -> Result<(), ApplicationError> {
-    let client = Client::new();
+    let client = ClientBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build()?;
     let semaphore = Arc::new(Semaphore::new(10));
     let headers = create_custom_headers().await?;
     let media_id = "3124599534";
@@ -77,12 +81,13 @@ async fn main() -> Result<(), ApplicationError> {
             let video_data = fetch_video_data(&client, &bvid, &headers).await?;
             let audio_url =
                 fetch_audio_url(&client, &bvid, &video_data.cid.to_string(), &headers).await?;
-            download_audio(
+            download_audio_with_retry(
                 &client,
                 &audio_url,
                 &video_data.title,
                 &video_data.owner.name,
                 &headers,
+                3, // 设置重试次数为3
             )
             .await?;
             progress_bar.inc(1);
@@ -93,8 +98,18 @@ async fn main() -> Result<(), ApplicationError> {
     }
 
     for handle in handles {
-        if let Err(_) = handle.await? {
-            return Err(ApplicationError::TaskProcessingError);
+        match handle.await {
+            Ok(result) => match result {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Task failed with error: {:?}", e);
+                    return Err(ApplicationError::TaskProcessingError);
+                }
+            },
+            Err(e) => {
+                eprintln!("Task panicked or was cancelled: {:?}", e);
+                return Err(ApplicationError::TaskProcessingError);
+            }
         }
     }
 
@@ -174,42 +189,87 @@ async fn fetch_audio_url(
         })
 }
 
-async fn download_audio(
+async fn download_audio_with_retry(
     client: &Client,
     audio_url: &str,
     title: &str,
     owner_name: &str,
     headers: &header::HeaderMap,
+    retry_limit: usize,
 ) -> Result<(), ApplicationError> {
     let safe_title = title.replace('/', "-");
     let safe_owner_name = owner_name.replace('/', "-");
     let filename = format!("{}-{}.mp3", safe_title, safe_owner_name);
-    let response = client
-        .get(audio_url)
-        .headers(headers.clone())
-        .send()
-        .await
-        .map_err(ApplicationError::NetworkError)?;
 
-    let audio_data = response
-        .bytes()
-        .await
-        .map_err(ApplicationError::NetworkError)?;
-
-    let mut audio_cursor = Cursor::new(audio_data);
-    let file_result = File::create(&filename);
-
-    match file_result {
-        Ok(mut file) => {
-            if let Err(e) =
-                io::copy(&mut audio_cursor, &mut file).map_err(ApplicationError::IoError)
-            {
-                let _ = std::fs::remove_file(&filename);
-                Err(e)
-            } else {
-                Ok(())
+    for attempt in 0..=retry_limit {
+        let response = match client.get(audio_url).headers(headers.clone()).send().await {
+            Ok(res) => res,
+            Err(e) => {
+                if attempt < retry_limit {
+                    let wait_time = Duration::from_secs(2u64.pow(attempt as u32)); // 指数退避
+                    eprintln!(
+                        "Attempt {} failed, retrying in {:?}: {:?}",
+                        attempt, wait_time, e
+                    );
+                    sleep(wait_time).await;
+                    continue;
+                } else {
+                    return Err(ApplicationError::NetworkError(e));
+                }
             }
-        }
-        Err(e) => Err(ApplicationError::IoError(e)),
+        };
+
+        let audio_data = match response.bytes().await {
+            Ok(data) => data,
+            Err(e) => {
+                if attempt < retry_limit {
+                    let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
+                    eprintln!(
+                        "Attempt {} failed, retrying in {:?}: {:?}",
+                        attempt, wait_time, e
+                    );
+                    sleep(wait_time).await;
+                    continue;
+                } else {
+                    return Err(ApplicationError::NetworkError(e));
+                }
+            }
+        };
+
+        let mut audio_cursor = Cursor::new(audio_data);
+        match File::create(&filename) {
+            Ok(mut file) => match io::copy(&mut audio_cursor, &mut file) {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&filename);
+                    if attempt < retry_limit {
+                        let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
+                        eprintln!(
+                            "Attempt {} failed, retrying in {:?}: {:?}",
+                            attempt, wait_time, e
+                        );
+                        sleep(wait_time).await;
+                        continue;
+                    } else {
+                        return Err(ApplicationError::IoError(e));
+                    }
+                }
+            },
+            Err(e) => {
+                if attempt < retry_limit {
+                    let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
+                    eprintln!(
+                        "Attempt {} failed, retrying in {:?}: {:?}",
+                        attempt, wait_time, e
+                    );
+                    sleep(wait_time).await;
+                    continue;
+                } else {
+                    return Err(ApplicationError::IoError(e));
+                }
+            }
+        };
     }
+
+    Err(ApplicationError::TaskProcessingError)
 }
