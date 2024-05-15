@@ -24,5 +24,8 @@ if ($path -notlike "*$INSTALL_DIR*") {
     Write-Output "$INSTALL_DIR is already in the PATH"
 }
 
+# 删除临时文件
+Remove-Item -Path $TMP_FILE -Force
+
 Write-Output "$BINARY_NAME installed to $INSTALL_DIR"
 Write-Output "Installation complete. You may need to restart your terminal or log out and back in for changes to take effect."
