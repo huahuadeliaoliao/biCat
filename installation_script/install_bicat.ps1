@@ -17,7 +17,7 @@ Move-Item -Path $TMP_FILE -Destination "$INSTALL_DIR\$BINARY_NAME.exe"
 
 # 检查并添加到 PATH 环境变量
 $path = [System.Environment]::GetEnvironmentVariable("Path", [System.EnvironmentVariableTarget]::User)
-if ($path -notlike "*$INSTALL_DIR*") {
+if ($path -split ';' -notcontains $INSTALL_DIR) {
     $newPath = "$path;$INSTALL_DIR"
     [System.Environment]::SetEnvironmentVariable("Path", $newPath, [System.EnvironmentVariableTarget]::User)
     Write-Output "$INSTALL_DIR added to PATH"
