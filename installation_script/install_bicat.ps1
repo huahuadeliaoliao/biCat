@@ -18,14 +18,12 @@ Move-Item -Path $TMP_FILE -Destination "$INSTALL_DIR\$BINARY_NAME.exe"
 # 检查并添加到 PATH 环境变量
 $path = [System.Environment]::GetEnvironmentVariable("Path", [System.EnvironmentVariableTarget]::User)
 if ($path -notlike "*$INSTALL_DIR*") {
-    [System.Environment]::SetEnvironmentVariable("Path", "$path;$INSTALL_DIR", [System.EnvironmentVariableTarget]::User)
+    $newPath = "$path;$INSTALL_DIR"
+    [System.Environment]::SetEnvironmentVariable("Path", $newPath, [System.EnvironmentVariableTarget]::User)
     Write-Output "$INSTALL_DIR added to PATH"
 } else {
     Write-Output "$INSTALL_DIR is already in the PATH"
 }
 
-# 删除临时文件
-Remove-Item -Path $TMP_FILE -Force
-
 Write-Output "$BINARY_NAME installed to $INSTALL_DIR"
-Write-Output "Installation complete. You may need to restart your terminal or log out and back in for changes to take effect."
+Write-Output "Installation complete. Please restart your terminal or log out and back in for changes to take effect."
