@@ -6,7 +6,7 @@
 <h1 align="center">biCat</h1>
 
 # 简介
-biCat 是一个基于 tokio 的命令行工具，用于快速下载 bilibili 视频的音频文件，无需登录（需下载的目标收藏夹必须公开）
+biCat 是一个基于 tokio 的命令行工具，用于快速下载 bilibili 视频的音频文件，无需登录（目标收藏夹需要在下载的时候公开）
 
 # 安装说明
   - 如果安装遇到网络问题可以使用[gitee](https://gitee.com/huahuadeliaoliao/biCat)
