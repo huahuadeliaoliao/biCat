@@ -58,16 +58,16 @@ async fn create_custom_headers() -> Result<header::HeaderMap, ApplicationError> 
 async fn main() -> Result<(), ApplicationError> {
     let matches = Command::new("bicat")
         .version("0.1.0")
-        .about("Downloads audio from Bilibili given a media ID or BVIDs.")
+        .about("从Bilibili下载音频，给定收藏夹ID或bvid。")
         .arg(
             Arg::new("media_id")
-                .help("The folder ID from which to retrieve the video")
+                .help("要下载的单个收藏夹ID，也就是收藏夹网址fid后面的数字，在下载中收藏夹需要处于公开状态。")
                 .required(false)
                 .conflicts_with("bvids"),
         )
         .arg(
             Arg::new("bvids")
-                .help("One or more BVIDs to download audio from")
+                .help("使用bicat -b [bvid]来指定一个或多个要下载的bvid，也就是视频网站中以BV开头的号码，多个bvid使用空格隔开。")
                 .short('b')
                 .required(false)
                 .num_args(1..),
@@ -87,23 +87,21 @@ async fn main() -> Result<(), ApplicationError> {
     let shutdown_signal = tokio::spawn({
         let temp_files = Arc::clone(&temp_files);
         async move {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to listen for event");
-            println!("Received Ctrl+C, shutting down...");
+            tokio::signal::ctrl_c().await.expect("监听Ctrl+C事件失败");
+            println!("收到Ctrl+C，正在中断任务...");
             clean_temp_files(&temp_files);
         }
     });
 
     let main_task = tokio::spawn(async move {
         if let Err(e) = run_main_logic(matches, client, semaphore, headers, temp_files).await {
-            eprintln!("Application error: {}", e);
+            eprintln!("应用程序运行存在一些错误：{}", e);
         }
     });
 
     tokio::select! {
         _ = shutdown_signal => {
-            println!("Cleanup before exiting...");
+            println!("正在清理临时文件...");
         },
         _ = main_task => {}
     }
@@ -123,23 +121,23 @@ async fn run_main_logic(
     } else if let Some(media_id) = matches.get_one::<String>("media_id") {
         match fetch_bvids_from_media_id(&client, media_id, &headers).await {
             Ok(bvids) if bvids.is_empty() => {
-                eprintln!("Error: No videos found or private collection.");
+                eprintln!("错误：收藏夹中未找到有效的bvid。");
                 return Err(ApplicationError::DataFetchError);
             }
             Ok(bvids) => {
                 if let Err(e) = create_and_enter_directory(media_id) {
-                    eprintln!("Directory creation error: {}", e);
+                    eprintln!("目录创建错误：{}", e);
                     return Err(ApplicationError::IoError(e));
                 }
                 bvids
             }
             Err(e) => {
-                eprintln!("Data fetch error: {}", e);
+                eprintln!("数据获取错误：{}", e);
                 return Err(e);
             }
         }
     } else {
-        eprintln!("Input error: Specify media_id or bvids.");
+        eprintln!("输入格式错误，请使用bicat -h来获得帮助。");
         return Err(ApplicationError::DataFetchError);
     };
 
@@ -186,12 +184,12 @@ async fn run_main_logic(
         match handle.await {
             Ok(result) => {
                 if let Err(_) = result {
-                    eprintln!("Task completed with errors for BVID {}", bvid);
+                    eprintln!("下载 {} 的任务完成时出错", bvid);
                     failed_bvids.push(bvid.clone());
                 }
             }
             Err(_) => {
-                eprintln!("Task could not be completed for BVID {}", bvid);
+                eprintln!("无法完成下载 {} 的任务", bvid);
                 failed_bvids.push(bvid.clone());
             }
         }
@@ -202,13 +200,13 @@ async fn run_main_logic(
     if !failed_bvids.is_empty() {
         let failed_bvids_str = failed_bvids.join(" ");
         println!(
-            "\nFailed to download audio for BVIDs: {}\nuse the \"bicat -b\" command to try again\n",
+            "\n未能成功下载的bvid：{}\n请使用\"bicat -b\"命令重试\n",
             failed_bvids_str
         );
         return Err(ApplicationError::TaskProcessingError);
     }
 
-    println!("Download complete");
+    println!("所有任务下载完成");
     Ok(())
 }
 
@@ -234,7 +232,7 @@ async fn fetch_bvids_from_media_id(
     let json = response
         .json::<Value>()
         .await
-        .map_err(|_| ApplicationError::DataParsingError("Invalid JSON format.".to_string()))?;
+        .map_err(|_| ApplicationError::DataParsingError("无效的JSON格式".to_string()))?;
     let bvids = json["data"]
         .as_array()
         .ok_or(ApplicationError::DataFetchError)?
@@ -263,7 +261,7 @@ async fn fetch_video_data(
         .json::<ApiResponse<VideoData>>()
         .await
         .map(|api_response| api_response.data)
-        .map_err(|_| ApplicationError::DataParsingError("Failed to parse video data.".to_string()))
+        .map_err(|_| ApplicationError::DataParsingError("解析视频数据失败".to_string()))
 }
 
 async fn fetch_audio_url(
@@ -282,7 +280,7 @@ async fn fetch_audio_url(
     response
         .json::<Value>()
         .await
-        .map_err(|_| ApplicationError::DataParsingError("Failed to parse audio URL.".to_string()))
+        .map_err(|_| ApplicationError::DataParsingError("解析音频URL失败".to_string()))
         .map(|json| {
             json["data"]["dash"]["audio"][0]["baseUrl"]
                 .as_str()
@@ -317,8 +315,8 @@ async fn download_audio_with_retry(
                 if attempt < retry_limit {
                     let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
                     eprintln!(
-                        "Attempt {} failed, retrying in {:?}: {}",
-                        attempt, wait_time, "Network error"
+                        "尝试 {} 失败，将在 {:?} 后重试：{}",
+                        attempt, wait_time, "网络错误"
                     );
                     sleep(wait_time).await;
                     continue;
@@ -334,8 +332,8 @@ async fn download_audio_with_retry(
                 if attempt < retry_limit {
                     let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
                     eprintln!(
-                        "Attempt {} failed, retrying in {:?}: {}",
-                        attempt, wait_time, "Data download error"
+                        "尝试 {} 失败，将在 {:?} 后重试：{}",
+                        attempt, wait_time, "数据下载错误"
                     );
                     sleep(wait_time).await;
                     continue;
@@ -361,8 +359,8 @@ async fn download_audio_with_retry(
                     if attempt < retry_limit {
                         let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
                         eprintln!(
-                            "Attempt {} failed, retrying in {:?}: {}",
-                            attempt, wait_time, "File write error"
+                            "尝试 {} 失败，将在 {:?} 后重试：{}",
+                            attempt, wait_time, "文件写入错误"
                         );
                         sleep(wait_time).await;
                         continue;
@@ -375,8 +373,8 @@ async fn download_audio_with_retry(
                 if attempt < retry_limit {
                     let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
                     eprintln!(
-                        "Attempt {} failed, retrying in {:?}: {}",
-                        attempt, wait_time, "File creation error"
+                        "尝试 {} 失败，将在 {:?} 后重试：{}",
+                        attempt, wait_time, "文件创建错误"
                     );
                     sleep(wait_time).await;
                     continue;
@@ -393,10 +391,7 @@ async fn download_audio_with_retry(
 fn create_and_enter_directory(media_id: &str) -> Result<(), io::Error> {
     let dir_path = Path::new(media_id);
     if dir_path.exists() {
-        println!(
-            "Directory {} already exists. Do you want to overwrite it? (y/n)",
-            media_id
-        );
+        println!("目录 {} 已经存在。你想覆盖它吗？(y/n)", media_id);
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         if input.trim().eq_ignore_ascii_case("y") {
@@ -404,7 +399,7 @@ fn create_and_enter_directory(media_id: &str) -> Result<(), io::Error> {
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "Directory already exists",
+                "目录下已存在同名文件夹，请处理后重试",
             ));
         }
     }
