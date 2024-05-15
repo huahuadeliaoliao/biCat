@@ -3,9 +3,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::{self, header, Client, ClientBuilder};
 use serde::Deserialize;
 use serde_json::Value;
-use std::fs::File;
+use std::collections::HashSet;
+use std::fs::{self, File};
 use std::io::{self, Cursor};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::task;
@@ -45,6 +47,10 @@ async fn create_custom_headers() -> Result<header::HeaderMap, ApplicationError> 
         "text/html, application/xhtml+xml, */*".parse()?,
     );
     headers.insert(header::REFERER, "https://www.bilibili.com".parse()?);
+    headers.insert(
+        header::USER_AGENT,
+        "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0".parse()?,
+    );
     Ok(headers)
 }
 
@@ -71,9 +77,47 @@ async fn main() -> Result<(), ApplicationError> {
     let client = ClientBuilder::new()
         .timeout(Duration::from_secs(30))
         .build()?;
-    let semaphore = Arc::new(Semaphore::new(10));
+    let semaphore = Arc::new(Semaphore::new(50));
     let headers = create_custom_headers().await?;
 
+    // 临时文件路径集合
+    let temp_files = Arc::new(Mutex::new(HashSet::new()));
+
+    // 注册信号处理器
+    let shutdown_signal = tokio::spawn({
+        let temp_files = Arc::clone(&temp_files);
+        async move {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to listen for event");
+            println!("Received Ctrl+C, shutting down...");
+            clean_temp_files(&temp_files);
+        }
+    });
+
+    let main_task = tokio::spawn(async move {
+        if let Err(e) = run_main_logic(matches, client, semaphore, headers, temp_files).await {
+            eprintln!("Application error: {}", e);
+        }
+    });
+
+    tokio::select! {
+        _ = shutdown_signal => {
+            println!("Cleanup before exiting...");
+        },
+        _ = main_task => {}
+    }
+
+    Ok(())
+}
+
+async fn run_main_logic(
+    matches: clap::ArgMatches,
+    client: Client,
+    semaphore: Arc<Semaphore>,
+    headers: header::HeaderMap,
+    temp_files: Arc<Mutex<HashSet<String>>>,
+) -> Result<(), ApplicationError> {
     let video_bvids = if let Some(bvids) = matches.get_many::<String>("bvids") {
         bvids.map(|s| s.to_string()).collect()
     } else if let Some(media_id) = matches.get_one::<String>("media_id") {
@@ -82,7 +126,13 @@ async fn main() -> Result<(), ApplicationError> {
                 eprintln!("Error: No videos found or private collection.");
                 return Err(ApplicationError::DataFetchError);
             }
-            Ok(bvids) => bvids,
+            Ok(bvids) => {
+                if let Err(e) = create_and_enter_directory(media_id) {
+                    eprintln!("Directory creation error: {}", e);
+                    return Err(ApplicationError::IoError(e));
+                }
+                bvids
+            }
             Err(e) => {
                 eprintln!("Data fetch error: {}", e);
                 return Err(e);
@@ -109,6 +159,7 @@ async fn main() -> Result<(), ApplicationError> {
         let headers = headers.clone();
         let semaphore = semaphore.clone();
         let progress_bar = progress_bar.clone();
+        let temp_files = Arc::clone(&temp_files);
         let handle = task::spawn(async move {
             let _permit = semaphore.acquire_owned().await;
             let video_data = fetch_video_data(&client, &bvid, &headers).await?;
@@ -121,6 +172,7 @@ async fn main() -> Result<(), ApplicationError> {
                 &video_data.owner.name,
                 &headers,
                 3,
+                &temp_files,
             )
             .await?;
             progress_bar.inc(1);
@@ -145,6 +197,8 @@ async fn main() -> Result<(), ApplicationError> {
         }
     }
 
+    clean_temp_files(&temp_files);
+
     if !failed_bvids.is_empty() {
         let failed_bvids_str = failed_bvids.join(" ");
         println!(
@@ -156,6 +210,13 @@ async fn main() -> Result<(), ApplicationError> {
 
     println!("Download complete");
     Ok(())
+}
+
+fn clean_temp_files(temp_files: &Arc<Mutex<HashSet<String>>>) {
+    let temp_files = temp_files.lock().unwrap();
+    for temp_file in temp_files.iter() {
+        let _ = fs::remove_file(temp_file);
+    }
 }
 
 async fn fetch_bvids_from_media_id(
@@ -237,10 +298,17 @@ async fn download_audio_with_retry(
     owner_name: &str,
     headers: &header::HeaderMap,
     retry_limit: usize,
+    temp_files: &Arc<Mutex<HashSet<String>>>,
 ) -> Result<(), ApplicationError> {
     let safe_title = title.replace('/', "-");
     let safe_owner_name = owner_name.replace('/', "-");
     let filename = format!("{}-{}.mp3", safe_title, safe_owner_name);
+    let temp_filename = format!("{}.tmp", filename);
+
+    {
+        let mut temp_files_guard = temp_files.lock().unwrap();
+        temp_files_guard.insert(temp_filename.clone());
+    }
 
     for attempt in 0..=retry_limit {
         let response = match client.get(audio_url).headers(headers.clone()).send().await {
@@ -278,11 +346,18 @@ async fn download_audio_with_retry(
         };
 
         let mut audio_cursor = Cursor::new(audio_data);
-        match File::create(&filename) {
+        match File::create(&temp_filename) {
             Ok(mut file) => match io::copy(&mut audio_cursor, &mut file) {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    fs::rename(&temp_filename, &filename)?;
+                    {
+                        let mut temp_files_guard = temp_files.lock().unwrap();
+                        temp_files_guard.remove(&temp_filename);
+                    }
+                    return Ok(());
+                }
                 Err(e) => {
-                    let _ = std::fs::remove_file(&filename);
+                    let _ = fs::remove_file(&temp_filename);
                     if attempt < retry_limit {
                         let wait_time = Duration::from_secs(2u64.pow(attempt as u32));
                         eprintln!(
@@ -313,4 +388,27 @@ async fn download_audio_with_retry(
     }
 
     Err(ApplicationError::TaskProcessingError)
+}
+
+fn create_and_enter_directory(media_id: &str) -> Result<(), io::Error> {
+    let dir_path = Path::new(media_id);
+    if dir_path.exists() {
+        println!(
+            "Directory {} already exists. Do you want to overwrite it? (y/n)",
+            media_id
+        );
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if input.trim().eq_ignore_ascii_case("y") {
+            fs::remove_dir_all(dir_path)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Directory already exists",
+            ));
+        }
+    }
+    fs::create_dir(media_id)?;
+    std::env::set_current_dir(media_id)?;
+    Ok(())
 }
