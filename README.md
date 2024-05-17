@@ -29,7 +29,10 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/huahuadeliaoliao/biCat/
 ```
 
 ## MacOS
-  - 暂时只能下载源码自行编译二进制文件后放入到可执行目录当中
+  - 使用以下命令安装 biCat，这会将bicat二进制可执行文件（支持aarch64和x86）放入到当前用户的./local/bin目录当中：
+```bash
+curl -s https://raw.githubusercontent.com/huahuadeliaoliao/biCat/main/installation_script/install_bicat.sh | bash
+```
 
 # 版本历史
 ## 正式版 0.1.0

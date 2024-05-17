@@ -21,7 +21,10 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/huahuadeliaoliao/biCat/
 ```
 
 ## MacOS
-  - For the time being, you can only download the source code and compile the binaries yourself and put them in the executable directory.
+  - Use the following command to install biCat, which will place the bicat binary executable (supports aarch64 and x86) into the current user's . /local/bin directory:
+```bash
+curl -s https://raw.githubusercontent.com/huahuadeliaoliao/biCat/main/installation_script/install_bicat.sh | bash
+```
 
 ## Version history
 ## Official version 0.1.0
