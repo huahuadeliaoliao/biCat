@@ -1,6 +1,6 @@
 use clap::{Arg, Command};
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::{self, header, Client, ClientBuilder};
+use reqwest::{header, Client, ClientBuilder};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -54,7 +54,7 @@ async fn create_custom_headers() -> Result<header::HeaderMap, ApplicationError> 
     Ok(headers)
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), ApplicationError> {
     let matches = Command::new("bicat")
         .version("0.1.0")
